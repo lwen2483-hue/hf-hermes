@@ -1,4 +1,4 @@
-FROM nikolaik/python-nodejs:python3.10-nodejs20
+FROM nikolaik/python-nodejs:python3.10-nodejs22
 
 USER root
 
