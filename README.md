@@ -1,3 +1,14 @@
+---
+title: Hermes
+emoji: 🤖
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+---
+
+
+
 20260504更新内容
 ### 2.1 Baoyu 技能系统（Baoyu Skills）
 **什么是 Baoyu Skills？**
