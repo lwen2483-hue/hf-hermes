@@ -1,24 +1,8 @@
-FROM python:3.11-slim
+FROM nikolaik/python-nodejs:python3.10-nodejs20
 
-LABEL maintainer="Hermes Agent Community"
-LABEL version="0.10.0"
-LABEL description="Hermes Agent v0.10.0 with Web UI on Hugging Face Spaces"
+USER root
 
-# ==================== 环境变量 ====================
-ENV PYTHONUNBUFFERED=1
-ENV DEBIAN_FRONTEND=noninteractive
-ENV HERMES_HOME=/data/.hermes
-ENV PYTHONPATH=/app
-
-# BFF Server 环境变量（构建阶段）
-ENV PORT=7860
-ENV UPSTREAM=http://127.0.0.1:8642
-ENV HERMES_BIN=/usr/local/bin/hermes
-# 注意：NODE_ENV=production 不能在此设置！
-# npm install 在 NODE_ENV=production 时会跳过 devDependencies，
-# 导致 vue-tsc 等构建工具缺失。NODE_ENV 在运行时阶段再设置。
-
-# ==================== 系统依赖 ====================
+# 1. 安装基础依赖组件（确保 ffmpeg 等多媒体组件正常）
 RUN apt-get update && apt-get install -y \
     build-essential \
     ffmpeg \
@@ -28,102 +12,47 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# ==================== Node.js v23 ====================
-# hermes-web-ui 要求 Node >= 23.0.0
-RUN ARCH=$(dpkg --print-architecture) \
-    && if [ "$ARCH" = "amd64" ]; then NODE_ARCH="x64"; else NODE_ARCH="$ARCH"; fi \
-    && echo "Installing Node.js v23.11.0 for ${NODE_ARCH}" \
-    && curl -fsSL "https://nodejs.org/dist/v23.11.0/node-v23.11.0-linux-${NODE_ARCH}.tar.gz" \
-       -o /tmp/node.tar.gz \
-    && tar -xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 \
-    && rm -f /tmp/node.tar.gz \
-    && node --version \
-    && npm --version
+# 2. 创建核心运行目录并配置权限
+RUN mkdir -p /data/.hermes /data/.hermes-web-ui /app/logs /home/appuser/.hermes-web-ui/logs \
+    && mkdir -p /home/appuser/.baoyu-skills/baoyu-imagine/scripts \
+    && mkdir -p /opt/hermes-web-ui/dist \
+    && useradd -m -u 1000 appuser \
+    && ln -sf /data/.hermes /home/appuser/.hermes \
+    && mkdir -p /home/appuser/.cache \
+    && chown -R appuser:appuser /data /opt /app /home/appuser
 
-# ==================== Bun Runtime ====================
-# baoyu-skills 需要 bun 运行时
-# 安装到 /usr/local/bin 以便所有用户（包括 appuser）都能访问
+WORKDIR /app
+
+# 3. 安装 Bun 运行环境（很多新版组件需要它）
 RUN echo "Installing Bun runtime" \
     && curl -fsSL https://bun.sh/install | bash \
-    && export PATH="$PATH:/root/.bun/bin" \
-    && bun --version \
+    && export PATH="/root/.bun/bin:$PATH" \
     && cp /root/.bun/bin/bun /usr/local/bin/bun \
     && chmod +x /usr/local/bin/bun
 
-# bun 必须在运行时 PATH 中可用（agent 子进程通过 bun 调用 baoyu-skills）
-# /usr/local/bin 已在默认 PATH 中，所有用户均可访问
+# 4. 安装 yq 工具（用于解析 yaml 配置文件）
+RUN curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/bin/yq \
+    && chmod +x /usr/bin/yq
 
-# ==================== baoyu-skills 脚本预置 ====================
-# 将完整的 baoyu-imagine 脚本预置到 ~/.baoyu-skills/ 目录
-# 此目录是 main.ts loadExtendConfig() 的查找路径之一
-# 避免依赖 Web UI 技能安装（可能只下载编译产物而丢失 .ts 源文件）
-RUN mkdir -p /home/appuser/.baoyu-skills/baoyu-imagine && \
-    git clone --depth 1 https://github.com/JimLiu/baoyu-skills.git /tmp/baoyu-skills && \
-    cp -r /tmp/baoyu-skills/skills/baoyu-imagine/scripts \
-          /home/appuser/.baoyu-skills/baoyu-imagine/scripts && \
-    rm -rf /tmp/baoyu-skills
-
-# ==================== 工具安装 ====================
-# yq: 运行时修改 config.yaml
-RUN curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/bin/yq && \
-    chmod +x /usr/bin/yq
-
-# ==================== Python 依赖 ====================
+# 5. 复制依赖描述文件并安装 Python 依赖
 COPY requirements.txt /tmp/
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# ==================== Hermes Agent ====================
-# 克隆并安装 Hermes Agent（不再构建内置 Dashboard 前端，由 hermes-web-ui 替代）
-RUN git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && \
-    pip install --no-cache-dir /tmp/hermes-agent[all] && \
-    rm -rf /tmp/hermes-agent /root/.cache/pip
-
-# Playwright 浏览器（Hermes Agent 工具调用需要）
+# 6. 安装 Playwright 浏览器内核（用于 Agent 网页截图/爬虫功能）
 RUN npx playwright install chromium --with-deps --only-shell
 
-# ==================== Hermes Web UI ====================
-# 克隆、构建、精简 hermes-web-ui（单层，避免中间态占用空间）
-RUN git clone --depth 1 https://github.com/EKKOLearnAI/hermes-web-ui.git /tmp/hermes-web-ui && \
-    cd /tmp/hermes-web-ui && \
-    npm pkg delete scripts.prepare && \
-    npm install && \
-    npm run build && \
-    npm prune --omit=dev && \
-    mkdir -p /opt/hermes-web-ui && \
-    cp -r dist node_modules package.json /opt/hermes-web-ui/ && \
-    rm -rf /tmp/hermes-web-ui /root/.npm
-
-# ==================== 应用代码 ====================
-WORKDIR /app
-
+# 7. 复制项目核心核心源码
 COPY src/ /app/src/
-COPY entrypoint.sh /app/
-COPY image-proxy.js /app/
-COPY image-gen-siliconflow.ts /app/
 COPY config/config.yaml /data/.hermes/config.yaml
+COPY image-gen-siliconflow.ts /app/
+COPY image-proxy.js /app/
+COPY entrypoint.sh /app/
 
-# 创建数据目录
-RUN mkdir -p /data/.hermes /data/.hermes-web-ui /app/logs /home/appuser/.hermes-web-ui/logs && \
-    chmod +x /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
-# 设置非 root 用户（Hugging Face Spaces 要求）
-RUN useradd -m -u 1000 appuser && \
-    ln -sf /data/.hermes /home/appuser/.hermes && \
-    mkdir -p /home/appuser/.cache && \
-    chown -R appuser:appuser /data /opt/hermes-web-ui /app /home/appuser
-
+# 切换到安全用户运行
 USER appuser
 
-# ==================== 运行时环境变量 ====================
-# 构建阶段不设 NODE_ENV=production（会导致 npm install 跳过 devDependencies）
-# 此处设置，仅影响运行时行为
-ENV NODE_ENV=production
-
-# 7860: BFF Server (Web UI 入口，HF Spaces 要求)
-# 8642: Gateway API Server (BFF 的上游代理目标，仅容器内部)
-EXPOSE 7860
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
-    CMD curl -f http://localhost:7860/health || exit 1
+EXPOSE 8080
 
 ENTRYPOINT ["/app/entrypoint.sh"]
