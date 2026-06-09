@@ -12,13 +12,12 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. 创建核心运行目录并直接把权限给现有的 node 用户（UID 1000）
-RUN mkdir -p /data/.hermes /data/.hermes-web-ui /app/logs /home/node/.hermes-web-ui/logs \
-    && mkdir -p /home/node/.baoyu-skills/baoyu-imagine/scripts \
+# 2. 直接在 root 用户根目录下创建所需的全部目录
+RUN mkdir -p /data/.hermes /data/.hermes-web-ui /app/logs /root/.hermes-web-ui/logs \
+    && mkdir -p /root/.baoyu-skills/baoyu-imagine/scripts \
     && mkdir -p /opt/hermes-web-ui/dist \
-    && ln -sf /data/.hermes /home/node/.hermes \
-    && mkdir -p /home/node/.cache \
-    && chown -R node:node /data /opt /app /home/node
+    && ln -sf /data/.hermes /root/.hermes \
+    && mkdir -p /root/.cache
 
 WORKDIR /app
 
@@ -48,9 +47,6 @@ COPY image-proxy.js /app/
 COPY entrypoint.sh /app/
 
 RUN chmod +x /app/entrypoint.sh
-
-# 切换到系统自带的 node 用户运行
-USER node
 
 EXPOSE 8080
 
